@@ -1,0 +1,69 @@
+# Stage 1: Two-Tower Candidate Generation Configuration
+
+# Model Architecture
+model:
+  embedding_dim: 128
+  user_encoder_type: "mlp"  # Options: "mlp", "transformer"
+  item_encoder_type: "mlp"
+  
+  # MLP architecture
+  user_mlp_hidden_dims: [512, 256]
+  item_mlp_hidden_dims: [512, 256]
+  
+  # Transformer encoder (if used)
+  transformer_num_layers: 2
+  transformer_num_heads: 8
+  transformer_dropout: 0.1
+  
+  # Regularization
+  dropout: 0.2
+  l2_weight_decay: 0.0001
+
+# Training
+training:
+  batch_size: 512
+  learning_rate: 0.0001
+  num_epochs: 20
+  warmup_steps: 500
+  optimizer: "adam"
+  loss_function: "in_batch_softmax"  # Contrastive learning with in-batch negatives
+  temperature: 0.07                  # sharpens softmax — standard for contrastive learning
+  
+  # Device
+  device: "cuda"  # or "cpu"
+  num_workers: 0
+  pin_memory: false
+
+# Data
+data:
+  dataset_name: "spotify_million_playlists"
+  data_path: "./data/raw/"
+  processed_data_path: "./data/processed/"
+  max_files: 1000
+  max_playlists: null
+  
+  # Sequence settings
+  max_playlist_length: 50
+  min_playlist_length: 5
+  train_val_test_split: [0.7, 0.15, 0.15]
+  
+  # Negative sampling
+  num_negative_samples: 0  # use in-batch negatives only
+
+# Inference
+inference:
+  candidate_k: 1000
+  batch_size: 512
+  device: "cuda"
+
+# Evaluation
+evaluation:
+  recall_k: [10, 50, 100, 1000]
+  ndcg_k: [10, 50, 100]
+  
+# Checkpointing
+checkpoint:
+  save_path: "./checkpoints/"
+  save_interval: 1  # Save every N epochs
+  keep_best_only: true
+  metric_to_monitor: "val_recall@1000"  # Maximize this metric

@@ -1,0 +1,15 @@
+draft/
+
+stage_1/data/
+
+# Large checkpoint files — share via Google Drive instead
+stage_1/checkpoints/*.npy
+stage_1/checkpoints/uri_to_id.json
+
+stage_1/failed_experiments
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
