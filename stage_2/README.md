@@ -1,6 +1,6 @@
 # Stage 2 — Sequential Re-ranking (SASRec)
 
-**Status: NOT BUILT — this is your task.**
+**Status: NOT BUILT.**
 
 ---
 

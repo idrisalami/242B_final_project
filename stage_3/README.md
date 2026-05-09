@@ -1,8 +1,59 @@
 # Stage 3 — Diversity Re-ranking (MMR)
 
-**Status: NOT BUILT — this is your task.**
+**Status: NOT BUILT.**
 
 No training required. This is a rule-based algorithm.
+
+---
+
+## Working Without Stage 2
+
+You don't need to wait for Stage 2 to start. Use Stage 1 output directly as a substitute — the input format is identical (just 100 IDs + scores instead of 1000):
+
+```python
+import numpy as np, json
+
+item_factors = np.load('../stage_1/checkpoints/als_item_factors.npy')
+uri_to_id    = json.load(open('../stage_1/checkpoints/uri_to_id.json'))
+playlists    = np.load('../stage_1/checkpoints/playlists.npy', allow_pickle=True).tolist()
+
+def stage1_top100(playlist_ids):
+    """Substitute for Stage 2 output — use Stage 1's top-100 directly."""
+    user_emb = item_factors[playlist_ids].mean(axis=0)
+    scores   = user_emb @ item_factors.T
+    scores[playlist_ids] = -1e9
+    top100_idx = np.argpartition(scores, -100)[-100:]
+    top100_sorted = top100_idx[np.argsort(scores[top100_idx])[::-1]]
+    return top100_sorted.tolist(), scores[top100_sorted].tolist()
+
+# Test with any playlist from the test split
+n = len(playlists)
+test_playlists = playlists[int(n * 0.85):]
+context = test_playlists[0][:-1]
+
+candidate_ids, candidate_scores = stage1_top100(context)
+# Now pass these directly into your MMR function
+```
+
+For audio features, use random stubs while developing — the MMR logic works the same regardless:
+
+```python
+import random
+
+def stub_audio_features(song_ids):
+    return {
+        sid: {
+            "tempo":        random.uniform(80, 160),
+            "energy":       random.uniform(0, 1),
+            "valence":      random.uniform(0, 1),
+            "danceability": random.uniform(0, 1),
+            "artist_id":    f"artist_{sid % 500}",  # fake 500 unique artists
+        }
+        for sid in song_ids
+    }
+```
+
+Swap in real Spotify audio features once the pipeline is connected.
 
 ---
 

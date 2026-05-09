@@ -3,13 +3,15 @@
 Multi-stage music recommendation pipeline on the Spotify Million Playlist Dataset (MDP).
 
 ```
-Playlist (N = 2.26M songs)
+Playlist (N songs)
       ↓
 Stage 1 · ALS candidate generation   → top 1,000 candidates   [DONE]
       ↓
 Stage 2 · SASRec sequential ranking  → top 100                [TODO]
       ↓
 Stage 3 · MMR diversity re-ranking   → final 20–30            [TODO]
+      ↓
+Stage 4 · Streamlit interface                                  [TODO]
 ```
 
 ---
@@ -41,6 +43,9 @@ project/
 │   └── README.md
 │
 ├── stage_3/                      MMR re-ranking — NOT BUILT YET
+│   └── README.md
+│
+├── stage_4/                      Streamlit interface — NOT BUILT YET
 │   └── README.md
 │
 ├── PIPELINE.md                   full input/output contracts for every stage
@@ -87,9 +92,13 @@ def get_candidates(playlist_uris, k=1000):
 
 ## What is missing
 
-See `stage_2/README.md` and `stage_3/README.md` for full specs.
+| Stage | Owner | README |
+|---|---|---|
+| Stage 2 — SASRec ranking | — | [stage_2/README.md](stage_2/README.md) |
+| Stage 3 — MMR re-ranking | — | [stage_3/README.md](stage_3/README.md) |
+| Stage 4 — Streamlit interface | — | [stage_4/README.md](stage_4/README.md) |
 
-See `PIPELINE.md` for complete input/output contracts and data format.
+Each stage is fully independent — see its README for what it needs and what it produces. Full input/output contracts: [PIPELINE.md](PIPELINE.md).
 
 ---
 

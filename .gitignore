@@ -13,3 +13,6 @@ __pycache__/
 *.pyc
 *.pyo
 .mypy_cache/
+
+# Secrets
+.env
