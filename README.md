@@ -9,7 +9,7 @@ Stage 1 · ALS candidate generation   → top 1,000 candidates   [DONE]
       ↓
 Stage 2 · SASRec sequential ranking  → top 100                [DONE]
       ↓
-Stage 3 · MMR diversity re-ranking   → final 20–30            [TODO]
+Stage 3 · MMR diversity re-ranking   → final 20               [DONE]
       ↓
 Stage 4 · Streamlit interface                                  [TODO]
 ```
@@ -95,7 +95,7 @@ def get_candidates(playlist_uris, k=1000):
 | Stage | Status | README |
 |---|---|---|
 | Stage 2 — SASRec ranking | DONE — pipeline R@100=0.236, NDCG@10=0.046 | [stage_2/README.md](stage_2/README.md) |
-| Stage 3 — MMR re-ranking | TODO | [stage_3/README.md](stage_3/README.md) |
+| Stage 3 — MMR re-ranking | DONE — λ=0.5: recall@20=0.114, ILD=0.433 (+18% diversity for −4% recall vs Stage 2 top-20) | [stage_3/README.md](stage_3/README.md) |
 | Stage 4 — Streamlit interface | TODO | [stage_4/README.md](stage_4/README.md) |
 
 Each stage is fully independent — see its README for what it needs and what it produces. Full input/output contracts: [PIPELINE.md](PIPELINE.md).
