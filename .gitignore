@@ -21,3 +21,6 @@ __pycache__/
 stage_2/checkpoints/
 stage_2/data/
 .pytest_cache/
+
+# Stage 3
+stage_3/checkpoints/
