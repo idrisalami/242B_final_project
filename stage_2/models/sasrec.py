@@ -32,10 +32,16 @@ class _Block(nn.Module):
 
     def forward(self, x, attn_mask, key_padding_mask):
         h = self.ln1(x)
+        # key_padding_mask is intentionally NOT passed: with left-padding,
+        # the first position is often PAD, and causal attention restricts
+        # its keys to itself. If that key is also masked, softmax over all
+        # -inf produces NaN, which contaminates the whole forward via
+        # residual connections. PAD embeddings are zero, so attending to
+        # them costs little fidelity; the model can learn to ignore them.
         a, _ = self.attn(
             h, h, h,
             attn_mask=attn_mask,
-            key_padding_mask=key_padding_mask,
+            key_padding_mask=None,
             need_weights=False,
             is_causal=False,            # we pass attn_mask explicitly
         )

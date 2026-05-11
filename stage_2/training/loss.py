@@ -58,12 +58,14 @@ def masked_ce_loss(logits: torch.Tensor, positive_mask: torch.Tensor) -> torch.T
     logits:        (B, L, n_total)
     positive_mask: (B, L) bool
     """
-    B, L, N = logits.shape
-    target = torch.zeros(B, L, dtype=torch.long, device=logits.device)
-    loss = F.cross_entropy(
-        logits.reshape(B * L, N),
-        target.reshape(B * L),
-        reduction="none",
-    ).reshape(B, L)
-    denom = positive_mask.sum().clamp(min=1)
-    return (loss * positive_mask).sum() / denom
+    # Select valid positions BEFORE computing CE, so NaN/Inf at masked
+    # positions (e.g., from all-masked attention) never enters the loss
+    # or its gradient path. The previous "compute CE everywhere, multiply
+    # by mask" approach was vulnerable to `NaN * 0 == NaN` propagation.
+    valid_logits = logits[positive_mask]                       # (num_valid, N)
+    if valid_logits.numel() == 0:
+        return logits.sum() * 0.0                              # keep graph live
+    target = torch.zeros(
+        valid_logits.shape[0], dtype=torch.long, device=logits.device
+    )
+    return F.cross_entropy(valid_logits, target)
