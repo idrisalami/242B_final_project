@@ -18,7 +18,28 @@ import yaml
 
 CONFIG_PATH = "/repo/stage_2/config.yaml"
 
-with open(Path(__file__).parent / "config.yaml") as f:
+
+def _find_config_yaml() -> Path:
+    """Locate config.yaml at module-import time.
+
+    Locally: `Path(__file__).parent / "config.yaml"` works. Inside the Modal
+    container, Modal places the entry file at /root/modal_app.py (so
+    __file__.parent == /root, which has no config.yaml), but
+    `add_local_dir(".", "/repo")` mounts the full repo, so the config is at
+    /repo/stage_2/config.yaml.
+    """
+    local = Path(__file__).parent / "config.yaml"
+    if local.exists():
+        return local
+    in_container = Path(CONFIG_PATH)
+    if in_container.exists():
+        return in_container
+    raise FileNotFoundError(
+        f"config.yaml not found at {local} or {in_container}"
+    )
+
+
+with open(_find_config_yaml()) as f:
     CFG_LOCAL = yaml.safe_load(f)
 
 stub = modal.App(CFG_LOCAL["modal"]["app_name"])
