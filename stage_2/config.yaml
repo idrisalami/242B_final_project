@@ -1,0 +1,59 @@
+# Stage 2 SASRec configuration
+# Single source of truth — copied verbatim into each run's output dir for reproducibility.
+
+model:
+  d_model: 128
+  n_layers: 2
+  n_heads: 2
+  ffn_dim: 256
+  max_seq_len: 50
+  dropout: 0.2
+  vocab_size: 2262293          # 2262292 ALS tracks + 1 PAD slot (ID 0)
+
+data:
+  min_train_length: 10         # filter applied to TRAIN ONLY
+  train_size: 700000
+  val_size: 150000
+  test_size: 150000
+  val_eval_subset: 10000       # subset of val used for periodic eval during training
+
+training:
+  batch_size: 256
+  epochs: 15
+  warmup_steps: 1000
+  peak_lr_transformer: 1.0e-3
+  peak_lr_embedding: 1.0e-4
+  weight_decay: 0.01
+  grad_clip: 1.0
+  precision: bf16
+  seed: 42
+  # Negative pool composition (see spec §5.1, §5.2)
+  num_hard_negs: 128
+  num_random_negs: 128
+  # Early stopping
+  val_every_n_epochs: 2
+  early_stopping_patience_evals: 3   # = 6 epochs of patience
+  # Checkpoint cleanup
+  keep_best_and_last_only: true
+
+eval:
+  candidates_k: 1000
+  ranked_top_k: 100
+  metrics_recall_k: [10, 50, 100, 1000]
+  ndcg_k: 10
+
+modal:
+  gpu: a10g
+  volume_name: stage2-data
+  app_name: stage2-sasrec
+  function_timeout_sec: 14400      # 4 hours
+
+paths:
+  vol_root: /vol
+  als_factors: /vol/inputs/als_item_factors.npy
+  uri_to_id: /vol/inputs/uri_to_id.json
+  playlists_raw: /vol/inputs/playlists.npy
+  playlists_padded: /vol/derived/playlists_padded.npy
+  playlists_lengths: /vol/derived/playlists_lengths.npy
+  candidates: /vol/derived/candidates.npy
+  runs_dir: /vol/runs
