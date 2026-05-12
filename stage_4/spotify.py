@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Sequence
 
 try:
     from dotenv import load_dotenv
@@ -23,11 +23,13 @@ SPOTIFY_URI_RE = re.compile(r"^spotify:track:[A-Za-z0-9]+$")
 
 
 def load_stage4_env() -> None:
-    """Load `stage_4/.env` if python-dotenv is installed."""
+    """Load project and Stage 4 dotenv files if python-dotenv is installed."""
     if load_dotenv is None:
         return
-    env_path = Path(__file__).resolve().parent / ".env"
-    load_dotenv(env_path)
+    stage4_dir = Path(__file__).resolve().parent
+    project_root = stage4_dir.parent
+    load_dotenv(project_root / ".env")
+    load_dotenv(stage4_dir / ".env")
 
 
 def get_spotify_client():
@@ -100,6 +102,17 @@ def _track_to_meta(track: dict) -> Optional[dict]:
     }
 
 
+def _fallback_track_meta(uri: str) -> dict:
+    return {
+        "uri": uri,
+        "name": uri.split(":")[-1],
+        "artist": "Metadata unavailable",
+        "album": "",
+        "album_art": None,
+        "spotify_url": f"https://open.spotify.com/track/{uri.split(':')[-1]}",
+    }
+
+
 def fetch_playlist_tracks(sp, playlist_url_or_id: str) -> List[dict]:
     """Fetch every track in a Spotify playlist, following pagination."""
     playlist_id = parse_playlist_id(playlist_url_or_id)
@@ -134,22 +147,60 @@ def fetch_track_metadata(sp, uris: Iterable[str]) -> Dict[str, dict]:
     metadata: Dict[str, dict] = {}
     if sp is None:
         for uri in unique:
-            metadata[uri] = {
-                "uri": uri,
-                "name": uri.split(":")[-1],
-                "artist": "Metadata unavailable",
-                "album": "",
-                "album_art": None,
-                "spotify_url": f"https://open.spotify.com/track/{uri.split(':')[-1]}",
-            }
+            metadata[uri] = _fallback_track_meta(uri)
         return metadata
 
     for start in range(0, len(unique), 50):
         batch = unique[start:start + 50]
         ids = [uri.split(":")[-1] for uri in batch]
-        response = sp.tracks(ids)
+        try:
+            response = sp.tracks(ids)
+        except Exception:
+            for uri in batch:
+                metadata[uri] = _fallback_track_meta(uri)
+            continue
         for track in response.get("tracks", []):
             meta = _track_to_meta(track)
             if meta:
                 metadata[meta["uri"]] = meta
+        for uri in batch:
+            metadata.setdefault(uri, _fallback_track_meta(uri))
     return metadata
+
+
+def resolve_track_aliases(sp, uris: Sequence[str], market: str = "US") -> Dict[str, List[str]]:
+    """Return Spotify relink aliases for input URIs.
+
+    MPD was built from older Spotify track IDs. When Spotify relinks a track,
+    the pasted/current URI may differ from the older canonical URI in MPD.
+    """
+    unique = []
+    seen = set()
+    for uri in uris:
+        if uri not in seen:
+            unique.append(uri)
+            seen.add(uri)
+
+    aliases: Dict[str, List[str]] = {}
+    if sp is None:
+        return aliases
+
+    for start in range(0, len(unique), 50):
+        batch = unique[start:start + 50]
+        ids = [uri.split(":")[-1] for uri in batch]
+        try:
+            response = sp.tracks(ids, market=market)
+        except Exception:
+            continue
+        for requested_uri, track in zip(batch, response.get("tracks", [])):
+            if not track:
+                continue
+            candidates = []
+            current_uri = track.get("uri")
+            linked_uri = track.get("linked_from", {}).get("uri")
+            for candidate in (current_uri, linked_uri):
+                if candidate and candidate != requested_uri and SPOTIFY_URI_RE.fullmatch(candidate):
+                    candidates.append(candidate)
+            if candidates:
+                aliases[requested_uri] = candidates
+    return aliases

@@ -14,10 +14,9 @@ from stage_4.analysis import (
 )
 from stage_4.pipeline import RecommendationPipeline, detect_artifacts, load_analysis_data
 from stage_4.spotify import (
-    fetch_playlist_tracks,
-    fetch_track_metadata,
     get_spotify_client,
     parse_track_uris,
+    resolve_track_aliases,
 )
 
 
@@ -35,16 +34,8 @@ def load_spotify():
 
 
 @st.cache_data(show_spinner=False)
-def cached_playlist_tracks(playlist_url_or_id: str):
-    sp = load_spotify()
-    if sp is None:
-        raise RuntimeError("Spotify credentials are not configured.")
-    return fetch_playlist_tracks(sp, playlist_url_or_id)
-
-
-@st.cache_data(show_spinner=False)
-def cached_track_metadata(uris: tuple[str, ...]):
-    return fetch_track_metadata(load_spotify(), uris)
+def cached_track_aliases(uris: tuple[str, ...]):
+    return resolve_track_aliases(load_spotify(), list(uris))
 
 
 def show_status(status):
@@ -62,32 +53,22 @@ def show_input_preview(tracks):
     st.subheader(f"Input playlist ({len(tracks)} tracks)")
     preview = tracks[:8]
     for row in preview:
-        cols = st.columns([0.6, 5])
-        if row.get("album_art"):
-            cols[0].image(row["album_art"], width=52)
-        else:
-            cols[0].write("")
-        cols[1].write(f"**{row.get('name', row['uri'])}**")
-        cols[1].caption(row.get("artist", row["uri"]))
+        st.write(f"**{row['uri']}**")
     if len(tracks) > len(preview):
         st.caption(f"... and {len(tracks) - len(preview)} more")
 
 
-def show_recommendations(result, metadata):
+def show_recommendations(result):
     st.subheader("Recommendations")
     if not result.recommendations:
         st.warning("No recommendations could be generated from the known input tracks.")
         return
     for rec in result.recommendations:
-        meta = metadata.get(rec.uri, {})
-        cols = st.columns([0.55, 4.5, 1.2])
-        if meta.get("album_art"):
-            cols[0].image(meta["album_art"], width=56)
-        cols[1].write(f"**{rec.rank}. {meta.get('name', rec.uri)}**")
-        cols[1].caption(meta.get("artist", rec.uri))
-        if meta.get("spotify_url"):
-            cols[2].link_button("Open", meta["spotify_url"])
-        cols[2].caption(f"score {rec.score:.3f}")
+        track_id = rec.uri.split(":")[-1]
+        cols = st.columns([4.6, 1.1, 1])
+        cols[0].write(f"**{rec.rank}. {rec.uri}**")
+        cols[1].caption(f"ranking score {rec.score:.3f}")
+        cols[2].link_button("Open", f"https://open.spotify.com/track/{track_id}")
 
 
 def show_analysis(status):
@@ -114,7 +95,7 @@ def show_analysis(status):
         )
         .properties(height=260)
     )
-    st.altair_chart(model_chart, use_container_width=True)
+    st.altair_chart(model_chart, width="stretch")
 
     stage2 = analysis["stage2_metrics"]
     cols = st.columns(3)
@@ -155,9 +136,9 @@ def show_analysis(status):
                 )
                 .properties(height=220)
             )
-            st.altair_chart(loss_chart | val_chart, use_container_width=True)
+            st.altair_chart(loss_chart | val_chart, width="stretch")
         else:
-            st.altair_chart(loss_chart, use_container_width=True)
+            st.altair_chart(loss_chart, width="stretch")
         st.caption(f"Source: {analysis['source']['stage2_train_history']}")
     else:
         st.info(
@@ -189,7 +170,7 @@ def show_analysis(status):
         )
         .properties(height=260)
     )
-    st.altair_chart(tradeoff_chart, use_container_width=True)
+    st.altair_chart(tradeoff_chart, width="stretch")
 
     delta_long = sweep.melt(
         id_vars="lambda",
@@ -212,9 +193,9 @@ def show_analysis(status):
         )
         .properties(height=240)
     )
-    st.altair_chart(delta_chart, use_container_width=True)
+    st.altair_chart(delta_chart, width="stretch")
 
-    st.dataframe(sweep, use_container_width=True, hide_index=True)
+    st.dataframe(sweep, width="stretch", hide_index=True)
     st.caption(
         f"Baseline: {baseline['label']} "
         f"(Recall@20={baseline['Recall@20']:.4f}, ILD={baseline['ILD']:.4f}). "
@@ -227,7 +208,7 @@ def show_analysis(status):
     )
 
     st.subheader("Parameter variations covered")
-    st.dataframe(parameter_variations_df(), use_container_width=True, hide_index=True)
+    st.dataframe(parameter_variations_df(), width="stretch", hide_index=True)
 
 
 def main():
@@ -240,58 +221,57 @@ def main():
     tab_demo, tab_analysis = st.tabs(["Demo", "Analysis"])
 
     with tab_demo:
-        input_mode = st.radio(
-            "Input mode",
-            ["Spotify playlist URL", "Paste track URIs"],
-            horizontal=True,
-        )
         n_recs = st.slider("Number of recommendations", min_value=5, max_value=25, value=20, step=5)
-        mmr_lambda = st.slider("MMR lambda", min_value=0.0, max_value=1.0, value=0.5, step=0.1)
+        mmr_lambda = st.slider("MMR lambda", min_value=0.0, max_value=1.0, value=0.7, step=0.1)
 
-        tracks = []
-        playlist_uris = []
+        if "confirmed_playlist_uris" not in st.session_state:
+            st.session_state.confirmed_playlist_uris = []
 
-        if input_mode == "Spotify playlist URL":
-            playlist_url = st.text_input(
-                "Spotify playlist URL",
-                placeholder="https://open.spotify.com/playlist/...",
-            )
-            if playlist_url:
-                try:
-                    with st.spinner("Fetching playlist from Spotify..."):
-                        tracks = cached_playlist_tracks(playlist_url)
-                    playlist_uris = [t["uri"] for t in tracks]
-                except Exception as exc:
-                    st.error(str(exc))
-        else:
-            pasted = st.text_area(
-                "Spotify track URIs or track URLs",
-                placeholder="spotify:track:...\nspotify:track:...",
-                height=140,
-            )
-            playlist_uris = parse_track_uris(pasted)
-            tracks = [{"uri": uri, "name": uri, "artist": "Pasted URI", "album_art": None} for uri in playlist_uris]
+        pasted = st.text_area(
+            "Spotify track URIs or track URLs",
+            placeholder="spotify:track:...\nspotify:track:...",
+            height=140,
+        )
+        parsed_uris = parse_track_uris(pasted)
 
-        show_input_preview(tracks)
+        if st.button("Confirm tracks"):
+            st.session_state.confirmed_playlist_uris = parsed_uris
+
+        playlist_uris = st.session_state.confirmed_playlist_uris
+        if playlist_uris:
+            st.success(f"Confirmed {len(playlist_uris)} track(s).")
+            tracks = [{"uri": uri} for uri in playlist_uris]
+            show_input_preview(tracks)
+        elif pasted:
+            st.caption(f"Parsed {len(parsed_uris)} valid track URI(s). Confirm tracks to use them.")
 
         if playlist_uris and st.button("Generate recommendations", type="primary"):
             try:
                 with st.spinner("Loading pipeline and generating recommendations..."):
                     pipeline = load_pipeline()
+                    aliases = cached_track_aliases(tuple(playlist_uris))
                     result = pipeline.recommend(
                         playlist_uris,
                         n_recommendations=n_recs,
                         mmr_lambda=mmr_lambda,
+                        alias_uris=aliases,
                     )
                 cov = result.coverage
                 st.info(f"MPD coverage: {cov['known']} / {cov['total']} input tracks found.")
+                alias_hits = {
+                    uri: values
+                    for uri, values in aliases.items()
+                    if uri in result.known_input_uris and uri not in pipeline.uri_to_id
+                }
+                if alias_hits:
+                    st.caption(
+                        f"Resolved {len(alias_hits)} input track(s) through Spotify relink aliases."
+                    )
                 status_df = pd.DataFrame(
                     [{"stage": k, "status": v} for k, v in result.stage_status.items()]
                 )
-                st.dataframe(status_df, use_container_width=True, hide_index=True)
-                rec_uris = tuple(rec.uri for rec in result.recommendations)
-                metadata = cached_track_metadata(rec_uris)
-                show_recommendations(result, metadata)
+                st.dataframe(status_df, width="stretch", hide_index=True)
+                show_recommendations(result)
                 if result.unknown_input_uris:
                     with st.expander("Input tracks not found in MPD mapping"):
                         st.write(result.unknown_input_uris)

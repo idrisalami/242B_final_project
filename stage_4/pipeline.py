@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -217,14 +217,20 @@ class RecommendationPipeline:
         embeddings = np.load(self.status.stage2_embeddings, mmap_mode=None).astype(np.float32)
         return l2_normalize_rows(embeddings)
 
-    def known_raw_ids(self, playlist_uris: Sequence[str]) -> Tuple[List[int], List[str], List[str]]:
+    def known_raw_ids(
+        self,
+        playlist_uris: Sequence[str],
+        alias_uris: Mapping[str, Sequence[str]] | None = None,
+    ) -> Tuple[List[int], List[str], List[str]]:
         """Map Spotify URIs to raw Stage 1 IDs and return known/unknown URI lists."""
         ids: List[int] = []
         known: List[str] = []
         unknown: List[str] = []
         for uri in playlist_uris:
-            if uri in self.uri_to_id:
-                ids.append(self.uri_to_id[uri])
+            candidates = [uri, *(alias_uris or {}).get(uri, ())]
+            matched_uri = next((candidate for candidate in candidates if candidate in self.uri_to_id), None)
+            if matched_uri is not None:
+                ids.append(self.uri_to_id[matched_uri])
                 known.append(uri)
             else:
                 unknown.append(uri)
@@ -307,9 +313,10 @@ class RecommendationPipeline:
         playlist_uris: Sequence[str],
         n_recommendations: int = 20,
         mmr_lambda: float = 0.5,
+        alias_uris: Mapping[str, Sequence[str]] | None = None,
     ) -> PipelineResult:
         """Run the best available local pipeline for a Spotify URI playlist."""
-        raw_ids, known, unknown = self.known_raw_ids(playlist_uris)
+        raw_ids, known, unknown = self.known_raw_ids(playlist_uris, alias_uris=alias_uris)
         if not raw_ids:
             return PipelineResult(
                 recommendations=[],

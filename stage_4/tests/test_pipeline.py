@@ -92,3 +92,26 @@ def test_stage1_masks_seen_tracks(tmp_path):
     ids, _ = pipeline.stage1_candidates([0], k=3)
 
     assert 0 not in ids.tolist()
+
+
+def test_known_raw_ids_uses_aliases(tmp_path):
+    stage1 = tmp_path / "stage_1"
+    stage2 = tmp_path / "stage_2"
+    stage3 = tmp_path / "stage_3"
+    stage1.mkdir()
+    stage2.mkdir()
+    stage3.mkdir()
+
+    np.save(stage1 / "als_item_factors.npy", np.ones((1, 2), dtype=np.float32))
+    (stage1 / "uri_to_id.json").write_text(json.dumps({"spotify:track:old": 0}))
+    status = detect_artifacts(stage1_ckpt=stage1, stage2_ckpt=stage2, stage3_ckpt=stage3)
+    pipeline = RecommendationPipeline(status=status, device="cpu", mmap_stage1=False)
+
+    ids, known, unknown = pipeline.known_raw_ids(
+        ["spotify:track:new"],
+        alias_uris={"spotify:track:new": ["spotify:track:old"]},
+    )
+
+    assert ids == [0]
+    assert known == ["spotify:track:new"]
+    assert unknown == []

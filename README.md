@@ -1,174 +1,128 @@
-# Spotify recommendation system
+# Multi-Stage Spotify Recommendation System
 
-Multi-stage music recommendation pipeline on the Spotify Million Playlist Dataset (MDP).
+This project builds an end-to-end playlist continuation system on the Spotify Million Playlist Dataset (MPD). Given a partial playlist as Spotify track URIs, the app recommends additional tracks that fit the same playlist context.
 
-```
-Playlist (N songs)
-      ↓
-Stage 1 · ALS candidate generation   → top 1,000 candidates   [DONE]
-      ↓
-Stage 2 · SASRec sequential ranking  → top 100                [DONE]
-      ↓
-Stage 3 · MMR diversity re-ranking   → final 20               [DONE]
-      ↓
-Stage 4 · Streamlit interface                                  [TODO]
-```
+## How to Use the App
 
----
-
-## Repository layout
-
-```
-project/
-├── stage_1/                      ALS candidate generation — COMPLETE
-│   ├── checkpoints/              ← download from Google Drive
-│   │   ├── als_item_factors.npy  (1.1 GB) item embeddings (2262292 × 128)
-│   │   ├── uri_to_id.json        (105 MB) Spotify URI → integer ID
-│   │   └── playlists.npy         (~200 MB) all 1M playlists as integer sequences
-│   ├── data/
-│   │   └── data_loader.py        loads MPD slices, builds integer IDs
-│   ├── training/
-│   │   ├── train_als.py          trains ALS (run this to retrain)
-│   │   └── evaluate_als.py       evaluates on full 150K test set
-│   ├── utils/helpers.py
-│   ├── config/config.yaml
-│   ├── failed_experiments/       Two-Tower neural + Track2Vec (abandoned)
-│   │   ├── models/two_tower.py
-│   │   ├── inference/
-│   │   ├── evaluation/
-│   │   └── training/             train.py, trainer.py, train_track2vec.py
-│   └── STAGE_1_SUMMARY.md        what was tried and why ALS won
-│
-├── stage_2/                      SASRec ranking — NOT BUILT YET
-│   └── README.md
-│
-├── stage_3/                      MMR re-ranking — NOT BUILT YET
-│   └── README.md
-│
-├── stage_4/                      Streamlit interface — NOT BUILT YET
-│   └── README.md
-│
-├── PIPELINE.md                   full input/output contracts for every stage
-├── final_project.md              course project specification
-└── README.md                     this file
-```
-
----
-
-## Stage 1 
-
-**Method**: ALS matrix factorization 
-
-| Metric | Result | Target |
-|---|---|---|
-| Recall@100 | **0.154** | > 0.15 |
-| Recall@1000 | **0.42** | > 0.45 |
-
-Training: 8 minutes on Apple M-chip CPU. Three approaches were tried — see `STAGE_1_SUMMARY.md` for the full story.
-
-**Artifacts ready for Stage 2** (shared via Google Drive — no data download needed):
-- `stage_1/checkpoints/als_item_factors.npy` — (2,262,292 × 128) float32 track embeddings
-- `stage_1/checkpoints/uri_to_id.json` — maps `"spotify:track:abc"` → integer ID
-- `stage_1/checkpoints/playlists.npy` — all 1M playlists as integer ID sequences (~200 MB)
-
-**Quick inference from Stage 1:**
-```python
-import numpy as np, json
-
-item_factors = np.load('stage_1/checkpoints/als_item_factors.npy')
-uri_to_id    = json.load(open('stage_1/checkpoints/uri_to_id.json'))
-id_to_uri    = {v: k for k, v in uri_to_id.items()}
-
-def get_candidates(playlist_uris, k=1000):
-    ids      = [uri_to_id[u] for u in playlist_uris if u in uri_to_id]
-    user_emb = item_factors[ids].mean(axis=0)       # (128,)
-    scores   = user_emb @ item_factors.T             # (2262292,)
-    scores[ids] = -1e9                               # mask seen
-    top_k    = np.argpartition(scores, -k)[-k:]
-    return top_k[np.argsort(scores[top_k])[::-1]]   # sorted best-first
-```
-
----
-
-## What is missing
-
-| Stage | Status | README |
-|---|---|---|
-| Stage 2 — SASRec ranking | DONE — pipeline R@100=0.236, NDCG@10=0.046 | [stage_2/README.md](stage_2/README.md) |
-| Stage 3 — MMR re-ranking | DONE — λ=0.5: recall@20=0.114, ILD=0.433 (+18% diversity for −4% recall vs Stage 2 top-20) | [stage_3/README.md](stage_3/README.md) |
-| Stage 4 — Streamlit interface | TODO | [stage_4/README.md](stage_4/README.md) |
-
-Each stage is fully independent — see its README for what it needs and what it produces. Full input/output contracts: [PIPELINE.md](PIPELINE.md).
-
----
-
-## Setup
+Install dependencies:
 
 ```bash
-# Install dependencies
-uv sync        # or: pip install -r requirements.txt
+uv sync
 ```
 
----
+Run the Streamlit interface:
 
-## Getting the checkpoints
-
-All three checkpoint files are shared via Google Drive. Download them and place them in `stage_1/checkpoints/`:
-
+```bash
+PYTHONPATH=. uv run streamlit run stage_4/app.py
 ```
+
+In the app:
+
+1. Paste Spotify track URIs into the text box.
+2. Click **Confirm tracks**.
+3. Choose the number of recommendations.
+4. Adjust the MMR lambda slider if desired.
+5. Click **Generate recommendations**.
+
+The app reports MPD coverage, meaning how many pasted tracks exist in the training-time Spotify URI mapping. Recommendations can only be generated from tracks covered by this local MPD catalog. A good demo input should show nonzero coverage, ideally all tracks found.
+
+Example input:
+
+```text
+spotify:track:0UaMYEvWZi0ZqiDOoHU3YI
+spotify:track:6I9VzXrHxO9rA9A5euc8Ak
+spotify:track:0WqIKmW4BTrj3eJFmnCKMv
+spotify:track:1AWQoqb9bSvzTjaLralEkT
+spotify:track:1lzr43nnXAijIGYnCT8M8H
+spotify:track:0XUfyU2QviPAs6bxSpXYG4
+spotify:track:68vgtRHr7iZHpzGpon6Jlo
+spotify:track:3BxWKCI06eQ5Od8TY2JBeA
+spotify:track:7H6ev70Weq6DdpZyyTmUXk
+spotify:track:2PpruBYCo4H7WOBJ7Q2EwM
+```
+
+For a presentation, `MMR lambda = 0.7` is a good default: it keeps recommendations relevance-focused while still adding some diversity.
+
+## What Was Built
+
+The system uses a three-stage recommendation pipeline:
+
+```text
+Pasted Spotify track URIs
+        ↓
+Stage 1: ALS candidate generation
+        ↓
+Stage 2: SASRec sequential re-ranking
+        ↓
+Stage 3: MMR diversity re-ranking
+        ↓
+Ranked recommendations in the web app
+```
+
+Stage 1 retrieves 1000 candidate tracks from the full 2.26M-track catalog using implicit-feedback ALS. Stage 2 uses a SASRec-style Transformer to re-rank those candidates based on playlist order. Stage 3 applies Maximal Marginal Relevance (MMR) to trade off relevance and diversity in the final list.
+
+## Results
+
+| System | Recall@100 | NDCG@10 |
+|---|---:|---:|
+| Stage 1 ALS | 0.151 | 0.018 |
+| Stage 2 pipeline | 0.236 | 0.046 |
+
+Stage 2 improves Recall@100 by about 56% and NDCG@10 by about 156% over ALS alone.
+
+For diversity re-ranking:
+
+| Configuration | Recall@20 | ILD |
+|---|---:|---:|
+| Stage 2 raw top-20 | 0.119 | 0.368 |
+| MMR lambda = 0.5 | 0.114 | 0.433 |
+| MMR lambda = 0.7 | 0.117 | 0.393 |
+
+The reported `lambda = 0.5` setting increases intra-list diversity by about 18% with roughly a 4% Recall@20 loss. The app defaults to `lambda = 0.7` because it gives a cleaner live-demo balance between relevance and diversity.
+
+## Required Artifacts
+
+The app requires the Stage 1 artifacts:
+
+```text
 stage_1/checkpoints/
-    als_item_factors.npy   ← from Drive
-    uri_to_id.json         ← from Drive
-    playlists.npy          ← from Drive
+  als_item_factors.npy
+  uri_to_id.json
 ```
 
-**That's all you need** to build Stages 2 and 3. No raw data download required.
+Optional artifacts enable the full Stage 2 and Stage 3 path:
 
-Load the playlist sequences in one line:
-
-```python
-import numpy as np
-playlists = np.load('stage_1/checkpoints/playlists.npy', allow_pickle=True).tolist()
-# playlists: List[List[int]] — 1,000,000 playlists, each a list of integer track IDs
-# Same 70/15/15 train/val/test split as Stage 1:
-n = len(playlists)
-train_playlists = playlists[:int(n * 0.70)]
-val_playlists   = playlists[int(n * 0.70):int(n * 0.85)]
-test_playlists  = playlists[int(n * 0.85):]
+```text
+stage_2/checkpoints/best/model.pt
+stage_2/checkpoints/best/item_embeddings.npy
 ```
 
----
+or the flat checkpoint layout:
 
-## Raw data (only needed to retrain Stage 1)
+```text
+stage_2/checkpoints/best_model.pt
+stage_2/checkpoints/best_item_embeddings.npy
+```
 
-The raw Spotify Million Playlist Dataset is 31 GB uncompressed. You only need it if you want to retrain the ALS model from scratch.
+If Stage 2 or Stage 3 artifacts are missing, the app labels the fallback behavior explicitly.
 
-### 1. Request access
+## Repository Structure
 
-Go to the AICrowd challenge page and accept the license:
-https://www.aicrowd.com/challenges/spotify-million-playlist-dataset-challenge
+```text
+stage_1/    ALS candidate generation and training scripts
+stage_2/    SASRec model, training, and inference
+stage_3/    MMR diversity re-ranking
+stage_4/    Streamlit app and analysis view
+docs/       planning notes
+report.tex  final project report, if included locally
+```
 
-### 2. Download
+## Tests
+
+Run the Stage 4 tests:
 
 ```bash
-pip install aicrowd-cli
-aicrowd login
-aicrowd dataset download --challenge spotify-million-playlist-dataset-challenge
+PYTHONPATH=. uv run pytest stage_4/tests
 ```
 
-### 3. Place the files
-
-```
-stage_1/data/raw/data/
-    mpd.slice.0-999.json
-    ...
-    mpd.slice.999000-999999.json
-```
-
-### 4. Retrain
-
-```bash
-cd stage_1
-python training/train_als.py
-# ~30 min on CPU. Overwrites checkpoints/als_item_factors.npy and playlists.npy
-```
+These tests cover URI parsing, artifact detection, raw/shifted ID conversion, input-track masking, Spotify fallback behavior, and the analysis helpers.

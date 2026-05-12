@@ -1,0 +1,496 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[left=1in,right=1in,top=1in,bottom=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{fancyhdr}
+\usepackage{float}
+
+% Code listing style
+\lstset{
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,
+    columns=fullflexible,
+    frame=tb,
+    language=Python,
+    keywordstyle=\color{blue},
+    commentstyle=\color{gray},
+    stringstyle=\color{red},
+    showstringspaces=false,
+}
+\lstdefinelanguage{yaml}{
+    keywords={true,false,null,y,n},
+    keywordstyle=\color{blue},
+    sensitive=false,
+    comment=[l]{\#},
+    commentstyle=\color{gray},
+    morestring=[b]',
+    morestring=[b]"
+}
+\setlength{\headheight}{14pt}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\textit{CS 242B Final Project}}
+\lhead{\textit{Spotify Recommendation}}
+\cfoot{\thepage}
+
+\title{%
+  \textbf{Multi-Stage Spotify Recommendation System}\\[0.3em]
+  \Large{Applying Deep Learning to Sequential Music Retrieval}
+}
+\author{Youssef Miled, Idris Houir Alami, Emeryc Chuttarsing}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+% ============================================================================
+% ABSTRACT
+% ============================================================================
+
+\begin{abstract}
+We built a multi-stage playlist continuation system on the Spotify Million
+Playlist Dataset, which contains one million playlists, roughly 45 million
+playlist--track interactions, and 2.26 million unique tracks. The system
+decomposes recommendation into three stages: an implicit-feedback ALS model
+retrieves 1000 high-recall candidates, a SASRec-style causal Transformer
+re-ranks those candidates using playlist order, and a Maximal Marginal
+Relevance (MMR) layer trades a small amount of relevance for greater diversity
+in the final list. This staged design was motivated by scale: full-catalog
+neural retrieval over 2.26M songs was not practical under our compute budget,
+while a pure collaborative-filtering model ignored sequential structure. Our
+final pipeline improves Recall@100 from 0.151 with ALS alone to 0.236 after
+SASRec re-ranking, and improves NDCG@10 from 0.018 to 0.046. The MMR stage at
+$\lambda=0.5$ increases intra-list diversity by approximately 18\% while
+reducing Recall@20 by about 4\%. We also built a Streamlit interface that lets
+users paste Spotify track URIs, verifies which tracks are covered by the MPD
+mapping, and displays ranked recommendations together with stage-status and
+analysis views.
+\end{abstract}
+
+% ============================================================================
+% SECTION 1: INTRODUCTION
+% ============================================================================
+
+\section{Introduction}
+
+\subsection{Presentation link}
+
+\subsection{Problem Formulation}
+
+Considering that there are $N$ songs in a playlist, determine the $M$ songs that will follow them based on a library of 2.26 tracks. This is a sequential collaborative filtering problem. The challenge involves achieving relevance by recommending the next likely song in the playlist while avoiding redundancy.
+
+\subsection{Dataset and Pipeline}
+
+\textbf{Dataset:} Spotify Million Playlist Dataset: 1,000,000 playlists, 2,262,292 unique tracks, $\approx$45M interactions. Split: 70\% train (700K), 15\% val (150K), 15\% test (150K).
+
+\textbf{Pipeline:} Playlist Context → Stage 1 (ALS, top 1K) → Stage 2 (Ranking, 1K→100) → Stage 3 (Re-ranking with MMR diversity, 100→20--30) → Web UI.
+
+
+% ============================================================================
+% SECTION 2: METHODOLOGY
+% ============================================================================
+
+\section{Methodology and results}
+
+\subsection{Stage 1: Candidate generation}
+
+\subsubsection{Approach}
+
+Stage 1 solves the high-recall retrieval subproblem: given an observed playlist prefix
+$S=\{i_1,\ldots,i_t\}$, retrieve 1000 plausible next tracks from the full catalog of
+2.26M tracks. The input features are implicit interactions between playlists and tracks;
+the label for evaluation is the held-out final track. Because the interaction matrix is
+extremely sparse, we used implicit-feedback ALS as a practical first-stage collaborative
+filter. ALS factorizes a playlist $\times$ track matrix $\mathbf{R}$ into playlist and track
+embeddings, $\mathbf{R}\approx \mathbf{U}\mathbf{V}^T$, with
+$\mathbf{V}\in\mathbb{R}^{2.26M\times128}$. It minimizes a confidence-weighted squared
+loss with L2 regularization:
+\[
+\min_{\mathbf{U},\mathbf{V}}
+\sum_{p,i} c_{pi}(r_{pi}-\mathbf{u}_p^\top\mathbf{v}_i)^2
++ \lambda(\|\mathbf{U}\|_2^2+\|\mathbf{V}\|_2^2),
+\quad c_{pi}=1+\alpha r_{pi}.
+\]
+We used binary implicit feedback, factors=128, iterations=15, $\alpha=40$, and
+$\lambda=0.01$. At inference time, a new playlist has no learned row in $\mathbf{U}$, so
+we form a query embedding by mean-pooling its observed tracks,
+$\mathbf{u}_q = |S|^{-1}\sum_{i\in S}\mathbf{v}_i$, score all tracks by
+$\mathbf{u}_q^\top\mathbf{v}_j$, mask tracks already in the playlist, and return the top
+1000. This stage is intentionally order-agnostic: its role is broad filtering, while Stage
+2 handles sequence-aware ranking.
+
+Before choosing ALS, we tested two neural alternatives. A two-tower model used a shared
+128-dimensional embedding table, mean pooling, an MLP projection, L2 normalization, and
+in-batch InfoNCE with AdamW. Track2Vec trained skip-gram embeddings over playlist
+sequences. Both preserved the same mean-pooled retrieval bottleneck at inference, which
+made them poor matches for the first-stage retrieval constraint under our compute budget.
+
+\subsubsection{Results}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & \textbf{R@100} & \textbf{R@1000} & \textbf{Time} \\
+\midrule
+Two-Tower (neural) & 0.029 & 0.058 & 10h \\
+Track2Vec (Skip-gram) & 0.128 & 0.403 & 6h \\
+\textbf{ALS (chosen)} & \textbf{0.151} & \textbf{0.407} & \textbf{8m} \\
+\bottomrule
+\end{tabular}
+\caption{ALS outperforms neural baselines 5--7× while training 75× faster. Mean-pooling limits R@1000 to $\approx 40\%$.}
+\end{table}
+
+\textbf{Analysis:} ALS was the best Stage 1 tradeoff: it reached R@100=0.151 and
+R@1000=0.407 on all 150K test playlists in roughly 8 minutes, while the two-tower model
+trained for about 10 hours and remained close to the random InfoNCE loss
+($\log(512)\approx6.24$). Track2Vec learned useful local co-occurrence structure during
+training, but mean-pooling erased much of that sequence information at retrieval time,
+leaving R@1000 nearly identical to ALS and R@100 lower. The main error mode is therefore
+high bias rather than high variance: validation and test behavior were similar, but the
+query representation cannot distinguish ``song A then song B'' from ``song B then song
+A.'' This motivates the full pipeline design. Stage 1 supplies a fast, high-coverage
+candidate set; Stage 2 then applies causal self-attention to recover the ordering signal
+that ALS deliberately ignores.
+
+\subsection{Stage 2: Sequential Re-ranking (SASRec)}
+
+\subsubsection{Approach}
+
+A causal Transformer encoder reads the playlist as an ordered sequence and emits a query vector at the final non-pad position, scored against item embeddings: $\text{score}_j = \mathbf{q} \cdot \mathbf{e}_j$. Architecture: 2 layers, 2 heads, $d_{\text{model}}=128$, $d_{\text{ffn}}=256$, max sequence length 50, pre-LayerNorm with dropout 0.2. The item embedding table is initialized from Stage 1's $\mathbf{V}$ to inherit the co-occurrence structure already learned by ALS; positional embeddings are learned from scratch; ID 0 is reserved as a PAD token.
+
+Training uses causal language modeling: at every position $i$ of every training playlist, predict song $i+1$. Loss is softmax cross-entropy over a per-position score vector composed of $\{$positive$,\ 128$ hard negatives sampled from Stage 1's top-1000 candidates for the playlist$,\ 128$ random negatives uniform over the vocabulary$\}$. The hard-negative term aligns training with the inference distribution (Stage 2 re-ranks within Stage 1's candidate set); the random-negative term prevents the model from over-specializing to the candidate-set shape.
+
+Optimizer: AdamW with two parameter groups (discriminative fine-tuning) — transformer layers at $\eta=10^{-3}$, embedding table at $\eta=10^{-4}$ to preserve the ALS initialization. Weight decay $0.01$, linear warmup over 1000 steps then cosine decay, batch size 256, bf16 autocast, gradient clipping at max-norm 1.0. Trained on a Modal A10G GPU; 15-epoch budget with early stopping on validation NDCG@10 (patience: 3 evaluation checkpoints). Wall-clock $\sim$67 minutes; cost $\sim$\$3 on Modal credits.
+
+Evaluation: held-out last song. Two scoring modes --- \emph{pipeline} (score against Stage 1's top-1000 candidates for that playlist, the operational setting) and \emph{unconstrained} (score against the full 2.26M-track vocabulary, a model-quality probe independent of the candidate filter).
+
+\subsubsection{Results}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Method} & \textbf{R@10} & \textbf{R@100} & \textbf{R@1000} & \textbf{NDCG@10} \\
+\midrule
+Stage 1 (ALS, baseline) & 0.035 & 0.151 & 0.407 & 0.018 \\
+Stage 2 unconstrained & 0.022 & 0.070 & 0.188 & 0.013 \\
+\textbf{Stage 2 pipeline} & \textbf{0.082} & \textbf{0.236} & 0.407$^\dagger$ & \textbf{0.046} \\
+\bottomrule
+\end{tabular}
+\caption{Stage 2 evaluation on the 150K held-out test playlists. $^\dagger$ Pipeline R@1000 is locked at Stage 1's value because Stage 2 re-ranks within Stage 1's 1000 candidates and cannot change recall at that depth.}
+\label{tab:stage2_results}
+\end{table}
+
+\textbf{Analysis:} The pipeline configuration improves over Stage 1 alone by $+56\%$ on R@100 ($0.151 \to 0.236$) and $+156\%$ on NDCG@10 ($0.018 \to 0.046$), confirming that sequence-aware re-ranking captures signal that Stage 1's mean-pool inference discards. More striking is the gap between pipeline and unconstrained modes: pipeline R@100 (0.236) is $\sim 3.4\times$ unconstrained R@100 (0.070). Stage 2 \emph{alone}, without Stage 1's candidate filter, is a \emph{worse} retriever than Stage 1 itself --- because the fine-tuned embeddings have specialized for ranking within a candidate set, not for general retrieval over the full vocabulary. This empirically justifies the two-stage architecture: Stage 1 handles coarse filtering, Stage 2 handles fine ranking, and neither is sufficient on its own. Training plateaued at epoch 6 (Table~\ref{tab:stage2_training} in the appendix); the 2-layer architecture saturates quickly on this dataset, and the aspirational targets of R@100 $>$ 0.30 and NDCG@10 $>$ 0.15 were not reached, likely requiring a larger model and a longer training budget.
+
+\subsection{Stage 3: Diversity re-ranking (MMR)}
+
+\subsubsection{Approach}
+
+Greedy Maximal Marginal Relevance over Stage 2's top-100 per playlist, producing a final top-$K=20$. At each step, given the already-selected set $S$:
+\[
+\text{MMR}(c) = \lambda \cdot \text{rel}(c) - (1 - \lambda) \cdot \max_{s \in S} \cos(\mathbf{e}_c,\, \mathbf{e}_s)
+\]
+where $\text{rel}(c)$ is Stage 2's relevance score for candidate $c$ (min-max normalized within the playlist's 100 candidates) and $\mathbf{e}_c$ is the L2-normalized fine-tuned item embedding from Stage 2. The first pick uses pure relevance ($S = \emptyset$).
+
+The original project specification defined the diversity term in audio-feature space (tempo, energy, valence, danceability) with additional rule-based filters (artist cap, tempo continuity, energy smoothing). \textbf{None of this data was accessible within the project's scope}: Spotify Web API access for 2.26M tracks was infeasible, and no pre-fetched audio-feature dump was available. We therefore replaced audio-feature similarity with cosine similarity in Stage 2's learned embedding space, which encodes co-occurrence and sequential substitutability between songs --- exactly the structural property MMR's diversity term requires. The audio-feature-based post-filters were dropped entirely.
+
+Implementation is pure NumPy, fully vectorized over batches of 1024 playlists. Total runtime: $\sim 7$ seconds per $\lambda$ value on all 150K test playlists. Cost: \$0 (no Modal compute, no GPU).
+
+\subsubsection{Results}
+
+We swept $\lambda \in \{0.3, 0.5, 0.7\}$ and compared against the Stage 2 raw top-20 baseline (take Stage 2's top-20 without any re-ranking). Diversity is measured by \emph{intra-list diversity} (ILD), the mean pairwise cosine \emph{distance} ($1 - \cos$) among the final 20 songs in each playlist, averaged across all 150K test playlists.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Configuration} & \textbf{Recall@20} & \textbf{ILD} \\
+\midrule
+Stage 2 raw top-20 (baseline) & 0.119 & 0.368 \\
+MMR $\lambda = 0.3$ (diversity-leaning) & 0.098 & 0.496 \\
+\textbf{MMR $\lambda = 0.5$ (reported)} & \textbf{0.114} & \textbf{0.433} \\
+MMR $\lambda = 0.7$ (relevance-leaning) & 0.117 & 0.393 \\
+\bottomrule
+\end{tabular}
+\caption{Stage 3 evaluation on 150K test playlists, $K=20$. Higher ILD indicates more variety in the final selection; bounded in $[0, 2]$.}
+\label{tab:stage3_results}
+\end{table}
+
+\textbf{Analysis:} The $\lambda$ knob produces a clean monotonic tradeoff between recall and diversity, as the algorithm predicts. At the reported configuration ($\lambda = 0.5$), MMR sacrifices $\sim 4\%$ recall ($0.119 \to 0.114$) for an $\sim 18\%$ gain in intra-list diversity ($0.368 \to 0.433$). The $\lambda = 0.7$ point is particularly informative: diversity improves by $+6.6\%$ at only $-1.1\%$ recall, suggesting that Stage 2's raw top-20 is unnecessarily redundant. The fact that ILD changes meaningfully under MMR re-ordering also confirms that Stage 2's fine-tuned embeddings carry useful structural information \emph{beyond} the relevance score they were trained to produce: songs that score similarly in relevance are not necessarily close in embedding space, so MMR's diversity term has a real signal to exploit.
+
+\subsection{Web interface}
+
+We implemented the final system as a Streamlit web interface so that the
+pipeline could be tested interactively rather than only through offline metrics.
+The user provides a partial playlist by pasting Spotify track URIs. Each URI
+identifies one song on Spotify, and the app treats the pasted songs as the
+observed playlist context. The app then checks how many of those tracks appear
+in the MPD-derived \texttt{uri\_to\_id.json} mapping. This coverage check is
+important because the trained models can only reason over tracks that were seen
+in the Million Playlist Dataset; if coverage is zero, recommendation generation
+is blocked and the missing input tracks are shown to the user.
+
+For covered tracks, the interface runs the same three-stage pipeline used in
+offline evaluation. Stage 1 mean-pools the ALS item factors for the input tracks
+and retrieves the top 1000 candidate songs while masking already-seen inputs.
+Stage 2 re-ranks those candidates with SASRec when the checkpoint is available;
+otherwise the app explicitly labels the result as an ALS fallback. Stage 3 then
+applies MMR when the embedding artifact is available, producing the final ranked
+recommendation list. The UI exposes two controls: the number of recommendations
+and the MMR $\lambda$ value. Increasing $\lambda$ makes the final list more
+relevance-focused, while decreasing it gives more weight to diversity.
+
+The interface also includes an analysis tab for the presentation. This tab
+summarizes the Stage 1 versus Stage 2 ranking metrics, the Stage 2 training
+trajectory when available, and the Stage 3 $\lambda$ sweep showing the
+recall--diversity tradeoff. If optional JSON artifacts are missing, the app uses
+the documented experiment values from the repository so the demo remains
+reproducible. This design keeps the web interface transparent: it shows whether
+each stage is real or a fallback, reports MPD input coverage, and avoids
+claiming that recommendations can be produced for tracks outside the local
+training catalog.
+
+\subsubsection{Stack}
+
+The app is written in Python with Streamlit for the user interface. NumPy is
+used for ALS scoring and MMR re-ranking, PyTorch loads the SASRec checkpoint for
+Stage 2 inference, Pandas and Altair produce the analysis tables and charts, and
+Spotipy is used only for optional Spotify metadata lookup. The core artifacts
+loaded by the demo are the Stage 1 ALS item-factor matrix, the Spotify
+URI-to-integer-ID mapping, and, when present, the Stage 2 model and item
+embeddings. Unit tests cover URI parsing, artifact detection, ID-shift
+conventions between stages, masking of input tracks, and Spotify metadata
+fallback behavior.
+
+
+
+\section{Safety, Security, and Ethics}
+
+In a large-scale deployment scenario, our recommendation system could amplify the popularity bias because it is built based on the previous listening history of the users. Thus, it will recommend popular artists more often compared to emerging or minority ones, which can negatively affect the overall diversity of discovered music. Besides, the sequential recommendation algorithms aim to maximize engagement with music, which might foster addictive behavior or create filter bubbles by narrowing down content diversity. Moreover, the main privacy issue arises from the extensive use of user interaction history in large-scale recommendation systems. Interaction history may contain sensitive information such as personal preference, mood, culture, or even ethnicity. Although interaction data is anonymized, embedding models might memorize and potentially expose rare patterns in the listening history if not used properly. From the security point of view, recommendation systems might become targets of manipulation attacks, such as creating fake playlists or bots for artificial interactions to boost certain songs' performance in recommendations. Lastly, our model suffers from the cold-start problem for unpopular artists, which causes discrimination toward less represented content. However, since our approach is based on simple collaborative filtering and transformer ranking algorithms under resource-limited constraints, there would still need to be further precautions to make this project applicable for production use. In the event of production use, we should additional considerations for fairness-aware reranking, user privacy concerns, and the transparency of recommendation decisions.
+
+
+% ============================================================================
+% SECTION 4: CONCLUSION
+% ============================================================================
+
+\section{Conclusion}
+
+This project shows that a practical large-scale music recommender benefits from
+separating retrieval, ranking, and diversity control. ALS was the strongest
+first-stage retriever under our constraints: it trained quickly, scaled to 2.26M
+tracks, and produced a useful top-1000 candidate set. However, ALS alone could
+not model playlist order, so the SASRec re-ranker added substantial value by
+using sequential context, improving Recall@100 by 56\% and NDCG@10 by 156\%
+relative to the Stage 1 baseline. Finally, MMR gave an interpretable diversity
+knob: at $\lambda=0.5$, it increased intra-list diversity by about 18\% with
+only a modest recall loss.
+
+The main limitation is that the system remains bounded by the MPD catalog and
+by the Stage 1 candidate generator. Tracks not present in the URI mapping cannot
+be used as input, and Stage 2 cannot recover the true next song if Stage 1 did
+not retrieve it. The model also uses collaborative signals rather than audio
+features, so it captures playlist co-occurrence and sequential patterns but not
+direct musical properties such as tempo, timbre, or mood. Future work would
+include a stronger neural retrieval stage, larger SASRec or modern sequence
+models, artist and popularity debiasing, and a hybrid feature space that
+combines collaborative embeddings with audio or metadata features. Within the
+project constraints, the final system provides a complete and measurable
+end-to-end recommendation pipeline, from offline evaluation to an interactive
+web demo.
+
+\begin{thebibliography}{1}
+
+\bibitem{implicit} Bennet et al. (2020). ``Collaborative Filtering via Alternating Least Squares,'' \textit{Implicit library documentation}.
+
+\bibitem{mpd} Spotify. ``Million Playlist Dataset Challenge,'' RecSys Challenge 2018.
+
+\bibitem{sasrec} Wang-Cheng et al. (2018). ``Self-Attentive Sequential Recommendation,'' ICCM.
+
+\end{thebibliography}
+
+% ============================================================================
+% APPENDIX
+% ============================================================================
+
+\newpage
+\appendix
+
+\section{Detailed Results Tables}
+
+\subsection{Two-Tower Neural Network}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ccccc}
+\toprule
+\textbf{Epoch} & \textbf{Train Loss} & \textbf{Val Loss} & \textbf{Time/Epoch} & \textbf{Cumulative} \\
+\midrule
+1 & 6.28 & 6.24 & 1h 25m & 1h 25m \\
+2 & 6.23 & 6.20 & 2h 18m & 3h 43m \\
+3 & 6.17 & 6.12 & 2h 28m & 6h 11m \\
+4 & 6.11 & — & 2h 20m & 8h 31m \\
+\bottomrule
+\end{tabular}
+\caption{Two-Tower training. Random baseline = $\log(512) \approx 6.24$. Model barely improved.}
+\end{table}
+
+\subsection{ALS Full Results}
+
+\begin{table}[h]
+\centering
+\caption{ALS matrix factorization configuration and evaluation results.}
+\label{tab:als_detailed_results}
+\begin{tabular}{ll}
+\hline
+\textbf{Property} & \textbf{Value} \\
+\hline
+Dataset & Spotify Million Playlist Dataset \\
+Train / Val / Test split & 700K / 150K / 150K playlists \\
+Unique tracks & 2,262,292 \\
+Embedding dimension & 128 \\
+ALS iterations & 15 \\
+Regularization & 0.01 \\
+Confidence scaling $\alpha$ & 40 \\
+Training time & $\sim$8 minutes \\
+\hline
+Recall@10 & 0.0352 \\
+Recall@50 & 0.1023 \\
+Recall@100 & 0.1513 \\
+Recall@500 & 0.3188 \\
+Recall@1000 & 0.4067 \\
+NDCG@10 & 0.0179 \\
+\hline
+\end{tabular}
+\end{table}
+
+\section{Stage 2 Training Trajectory}
+
+The full SASRec run early-stopped at epoch 14 of a 15-epoch budget. Validation NDCG@10 peaked at epoch 6 (best checkpoint) and plateaued thereafter; the early-stopping rule (no improvement for 3 consecutive validation checkpoints) triggered at epoch 14.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{cccccc}
+\toprule
+\textbf{Epoch} & \textbf{Train Loss} & \textbf{Val R@10} & \textbf{Val R@100} & \textbf{Val NDCG@10} & \textbf{Wall (min)} \\
+\midrule
+2 & 3.363 & 0.081 & 0.236 & 0.045 & 9.3 \\
+4 & 3.101 & 0.082 & 0.239 & 0.046 & 18.7 \\
+\textbf{6} & \textbf{2.976} & \textbf{0.085} & \textbf{0.239} & \textbf{0.049} & 28.3 \\
+8 & 2.893 & 0.086 & 0.242 & 0.049 & 37.9 \\
+10 & 2.837 & 0.086 & 0.240 & 0.049 & 47.5 \\
+12 & 2.807 & 0.085 & 0.240 & 0.048 & 57.1 \\
+14 & 2.794 & 0.085 & 0.241 & 0.048 & 66.8 \\
+\bottomrule
+\end{tabular}
+\caption{SASRec training. Validation evaluated every 2 epochs on the first 10K val playlists in pipeline mode. Train loss kept decreasing but validation metrics plateaued by epoch 6 (bold = best checkpoint). Early-stopped at epoch 14.}
+\label{tab:stage2_training}
+\end{table}
+
+\section{Stage 2 Configuration}
+
+Key hyperparameters from \texttt{stage\_2/config.yaml}:
+
+\begin{lstlisting}[language=yaml]
+model:
+  d_model: 128
+  n_layers: 2
+  n_heads: 2
+  ffn_dim: 256
+  max_seq_len: 50
+  dropout: 0.2
+  vocab_size: 2262293     # 2262292 ALS tracks + 1 PAD
+
+training:
+  batch_size: 256
+  epochs: 15              # early-stopped at 14
+  warmup_steps: 1000
+  peak_lr_transformer: 1.0e-3
+  peak_lr_embedding: 1.0e-4
+  weight_decay: 0.01
+  grad_clip: 1.0
+  precision: bf16
+  num_hard_negs: 128
+  num_random_negs: 128
+  val_every_n_epochs: 2
+  early_stopping_patience_evals: 3
+\end{lstlisting}
+
+\section{Stage 3 Detailed Metrics}
+
+The full $\lambda$ sweep alongside the Stage 2 raw top-20 baseline. Each row is averaged over all 150K held-out test playlists.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Config} & \textbf{Recall@20} & \textbf{ILD} & \textbf{$\Delta$ Recall} & \textbf{$\Delta$ ILD} \\
+\midrule
+Stage 2 raw top-20 & 0.1186 & 0.3682 & --- & --- \\
+MMR $\lambda = 0.3$ & 0.0975 & 0.4958 & $-17.8\%$ & $+34.7\%$ \\
+\textbf{MMR $\lambda = 0.5$} & \textbf{0.1135} & \textbf{0.4327} & $-4.3\%$ & $+17.5\%$ \\
+MMR $\lambda = 0.7$ & 0.1173 & 0.3925 & $-1.1\%$ & $+6.6\%$ \\
+\bottomrule
+\end{tabular}
+\caption{Stage 3 $\lambda$ sweep on the full 150K test set, $K=20$. $\Delta$ columns are relative to the Stage 2 raw top-20 baseline.}
+\label{tab:stage3_sweep}
+\end{table}
+
+\section{Stage 1 Inference Code}
+
+\begin{lstlisting}[language=Python]
+import numpy as np, json
+
+item_factors = np.load('checkpoints/als_item_factors.npy')
+uri_to_id    = json.load(open('checkpoints/uri_to_id.json'))
+
+def get_candidates(playlist_uris, k=1000):
+    ids      = [uri_to_id[u] for u in playlist_uris 
+                if u in uri_to_id]
+    user_emb = item_factors[ids].mean(axis=0)
+    scores   = user_emb @ item_factors.T
+    scores[ids] = -1e9
+    top_k = np.argpartition(scores, -k)[-k:]
+    return top_k[np.argsort(scores[top_k])[::-1]]
+\end{lstlisting}
+
+\section{Configuration}
+
+Located at \texttt{stage\_1/config/config.yaml}:
+
+\begin{lstlisting}[language=yaml]
+als:
+  factors: 128
+  iterations: 15
+  regularization: 0.01
+  alpha: 40
+  
+train_split: 0.70
+val_split: 0.15
+test_split: 0.15
+\end{lstlisting}
+
+\section{Artifacts}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{llp{5cm}}
+\toprule
+\textbf{File} & \textbf{Size} & \textbf{Description} \\
+\midrule
+\texttt{als\_item\_factors.npy} & 1.1 GB & $(2,262,292 \times 128)$ item embeddings \\
+\texttt{uri\_to\_id.json} & 105 MB & URI $\leftrightarrow$ ID mapping \\
+\texttt{playlists.npy} & $\approx 200$ MB & 1M playlists as integer sequences \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{document}
