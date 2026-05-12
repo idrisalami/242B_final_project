@@ -10,11 +10,29 @@ Install dependencies:
 uv sync
 ```
 
+Create .env file with the following details:
+```bash
+SPOTIFY_CLIENT_ID=your_client_id
+SPOTIFY_CLIENT_SECRET=your_client_secret
+```
+
+## Checkpoint Files
+
+Checkpoint files are stored in Google Drive due to their large size (>2.5GB total):
+
+📁 **[Download checkpoints](https://drive.google.com/drive/folders/1_QebdOx9KCHu2d9rLRuYK9i0-rZ9DGuv?usp=share_link)**
+
+Download and extract them to their respective stage directories:
+- `stage_1/checkpoints/` — ALS item factors and URI mappings
+- `stage_2/checkpoints/` — SASRec model and embeddings
+- `stage_3/checkpoints/` — MMR sweep results
+
 Run the Streamlit interface:
 
 ```bash
 PYTHONPATH=. uv run streamlit run stage_4/app.py
-```
+```bash
+
 
 In the app:
 
