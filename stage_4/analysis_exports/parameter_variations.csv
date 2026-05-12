@@ -1,0 +1,4 @@
+parameter,values,measured metrics,purpose,status
+MMR lambda,"0.3, 0.5, 0.7","Recall@20, ILD",Measure relevance/diversity tradeoff.,Evaluated on 150K test playlists.
+Number of recommendations,"5, 10, 15, 20, 25",Live demo output only,Change how many final songs the app displays.,Interactive control; not an offline metric sweep.
+Evaluation sample size,150K test playlists,All reported metrics,Use stable full-test-set estimates.,Fixed in current artifacts; no subsample sweep saved.

@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Stage 1 two-tower music recommendation project"
 requires-python = ">=3.11"
 dependencies = [
+  "altair>=5.0",
   "implicit>=0.7.2",
   "modal>=0.64",
   "numpy>=1.24",
@@ -15,6 +16,9 @@ dependencies = [
   "peft>=0.19.1",
   "pyyaml>=6.0",
   "pytest>=8.0",
+  "python-dotenv>=1.0",
+  "spotipy>=2.24",
+  "streamlit>=1.35",
   "torch>=2.2",
   "tqdm>=4.67.3",
 ]

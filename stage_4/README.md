@@ -1,253 +1,197 @@
-# Stage 4 — Interface
+# Stage 4 — Streamlit Interface + Analysis
 
-**Status: NOT BUILT.**
+**Status: BUILT.**
 
-A Streamlit app that lets a user paste a Spotify playlist URL, runs the full pipeline, and displays the recommended songs.
-
----
-
-## What This Stage Does
-
-Wraps all three pipeline stages into a single interactive UI:
+Stage 4 wraps the completed recommendation pipeline in a transparent Streamlit demo and adds a compact experiment-analysis view.
 
 ```
-User pastes Spotify playlist URL
+Spotify playlist URL or pasted track URIs
       ↓
-Fetch track URIs from Spotify API
+Stage 1 ALS candidate generation       raw IDs      → top 1,000
       ↓
-Stage 1 (ALS)   — 2.26M tracks → top 1,000
+Stage 2 SASRec sequential re-ranking   shifted IDs  → top 100
       ↓
-Stage 2 (SASRec) — 1,000 → top 100          ← stub until Stage 2 is built
+Stage 3 MMR diversity re-ranking       shifted IDs  → final top 5-25
       ↓
-Stage 3 (MMR)   — 100 → final 20–30         ← stub until Stage 3 is built
-      ↓
-Display recommended tracks (name, artist, album art)
+Spotify metadata display
+```
+
+The app never overclaims. If a checkpoint is missing, it falls back to the strongest available local stage and shows that status in the UI.
+
+---
+
+## Files
+
+```
+stage_4/
+├── app.py          Streamlit app
+├── pipeline.py     artifact detection + Stage 1/2/3 integration
+├── spotify.py      Spotify URL parsing, playlist fetch, metadata fetch
+├── tests/          Stage 4 unit tests
+└── README.md
 ```
 
 ---
 
-## What You Need
+## Required and Optional Artifacts
 
-From Google Drive (`stage_1/checkpoints/`):
+Required for any recommendations:
 
-| File | Used for |
-|---|---|
-| `als_item_factors.npy` | Stage 1 retrieval |
-| `uri_to_id.json` | URI ↔ integer ID mapping |
-
-From teammates (once built):
-- `stage_2/checkpoints/sasrec_model.pt` — Stage 2 re-ranking
-- Stage 3 is pure Python (no checkpoint needed)
-
-From Spotify:
-- A **Spotify API client ID + secret** — needed to fetch track metadata (name, artist, album art) from a playlist URL. Free at [developer.spotify.com](https://developer.spotify.com/dashboard).
-
----
-
-## Step 1 — Install dependencies
-
-```bash
-pip install streamlit spotipy numpy
+```
+stage_1/checkpoints/
+├── als_item_factors.npy
+└── uri_to_id.json
 ```
 
-`spotipy` is the Python wrapper for the Spotify Web API.
+Optional for real Stage 2 + Stage 3:
+
+Flat layout from the Stage 2 README:
+
+```
+stage_2/checkpoints/
+├── best_model.pt
+└── best_item_embeddings.npy
+```
+
+or nested Modal checkpoint layout:
+
+```
+stage_2/checkpoints/best/
+├── model.pt
+└── item_embeddings.npy
+```
+
+Optional for the analysis tab:
+
+```
+stage_2/checkpoints/test_metrics.json
+stage_2/checkpoints/train_history.json
+stage_3/checkpoints/test_metrics.json
+stage_3/checkpoints/lambda_sweep.json
+```
+
+If the JSON files are missing, the analysis tab uses the documented results from the Stage 2 and Stage 3 READMEs:
+
+- Stage 2: R@10 = 0.082, R@100 = 0.236, NDCG@10 = 0.046.
+- Stage 3 λ sweep:
+  - λ=0.3: Recall@20 = 0.0975, ILD = 0.4958.
+  - λ=0.5: Recall@20 = 0.1135, ILD = 0.4327.
+  - λ=0.7: Recall@20 = 0.1173, ILD = 0.3925.
 
 ---
 
-## Step 2 — Set up Spotify API credentials
+## ID Convention
 
-Create a `.env` file in `stage_4/`:
+This is the most important integration detail.
+
+- Stage 1 uses raw MPD track IDs: `0, 1, 2, ...`.
+- Stage 2 and Stage 3 use shifted IDs: `0` is PAD, so real tracks are `raw_id + 1`.
+- Before calling Stage 2/3, Stage 4 shifts raw IDs by `+1`.
+- Before mapping final recommendations back to Spotify URIs, Stage 4 subtracts `1`.
+
+The conversion helpers live in `stage_4/pipeline.py`:
+
+```python
+raw_to_shifted([0, 41])      # [1, 42]
+shifted_to_raw([1, 42])      # [0, 41]
+```
+
+---
+
+## Spotify Credentials
+
+Playlist URL mode requires Spotify API credentials.
+
+Create `stage_4/.env`:
 
 ```
 SPOTIFY_CLIENT_ID=your_client_id_here
 SPOTIFY_CLIENT_SECRET=your_client_secret_here
 ```
 
-Then load them in code:
+Do not commit `.env`. The repo-level `.gitignore` already ignores it.
 
-```python
-import os
-import spotipy
-from spotipy.oauth2 import SpotifyClientCredentials
-
-sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
-    client_id=os.environ['SPOTIFY_CLIENT_ID'],
-    client_secret=os.environ['SPOTIFY_CLIENT_SECRET'],
-))
-```
+If credentials are unavailable, use **Paste track URIs** mode. Recommendations can still run, but metadata will be limited.
 
 ---
 
-## Step 3 — Fetch tracks from a playlist URL
+## Run the App
 
-Given a playlist URL like `https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M`, extract the playlist ID and fetch its tracks:
-
-```python
-def fetch_playlist_tracks(playlist_url: str) -> list[dict]:
-    """Returns list of {uri, name, artist, album_art} dicts."""
-    playlist_id = playlist_url.split('/')[-1].split('?')[0]
-    results = sp.playlist_tracks(playlist_id)
-    tracks = []
-    for item in results['items']:
-        t = item['track']
-        if t is None:
-            continue
-        tracks.append({
-            'uri':       t['uri'],                          # "spotify:track:abc123"
-            'name':      t['name'],
-            'artist':    t['artists'][0]['name'],
-            'album_art': t['album']['images'][0]['url'] if t['album']['images'] else None,
-        })
-    return tracks
-```
-
----
-
-## Step 4 — Run the pipeline
-
-```python
-import numpy as np
-import json
-
-# Load Stage 1 artifacts once at startup
-item_factors = np.load('../stage_1/checkpoints/als_item_factors.npy')
-uri_to_id    = json.load(open('../stage_1/checkpoints/uri_to_id.json'))
-id_to_uri    = {v: k for k, v in uri_to_id.items()}
-
-def stage1(playlist_uris: list[str], k: int = 1000) -> np.ndarray:
-    ids = [uri_to_id[u] for u in playlist_uris if u in uri_to_id]
-    if not ids:
-        return np.array([])
-    user_emb = item_factors[ids].mean(axis=0)
-    scores   = user_emb @ item_factors.T
-    scores[ids] = -1e9
-    top_k = np.argpartition(scores, -k)[-k:]
-    return top_k[np.argsort(scores[top_k])[::-1]]
-
-def stage2_stub(playlist_uris: list[str], candidate_ids: np.ndarray) -> np.ndarray:
-    """Placeholder — returns top-100 of Stage 1 candidates by ALS score."""
-    return candidate_ids[:100]
-
-def stage3_stub(candidate_ids: np.ndarray) -> list[str]:
-    """Placeholder — returns top-25 as URIs."""
-    return [id_to_uri[i] for i in candidate_ids[:25] if i in id_to_uri]
-
-def recommend(playlist_uris: list[str]) -> list[str]:
-    candidates = stage1(playlist_uris, k=1000)   # Stage 1
-    ranked     = stage2_stub(playlist_uris, candidates)  # Stage 2 (stub)
-    final_uris = stage3_stub(ranked)             # Stage 3 (stub)
-    return final_uris
-```
-
-Replace `stage2_stub` and `stage3_stub` with real implementations once those stages are built.
-
----
-
-## Step 5 — Build the Streamlit app
-
-Create `app.py`:
-
-```python
-import streamlit as st
-
-st.title("Spotify Playlist Recommender")
-
-playlist_url = st.text_input(
-    "Paste a Spotify playlist URL",
-    placeholder="https://open.spotify.com/playlist/...",
-)
-
-if playlist_url:
-    with st.spinner("Fetching playlist…"):
-        tracks = fetch_playlist_tracks(playlist_url)
-
-    if not tracks:
-        st.error("Could not fetch tracks. Check the URL and try again.")
-    else:
-        st.subheader(f"Input playlist ({len(tracks)} tracks)")
-        for t in tracks[:5]:
-            st.write(f"- {t['name']} — {t['artist']}")
-        if len(tracks) > 5:
-            st.caption(f"… and {len(tracks)-5} more")
-
-        with st.spinner("Generating recommendations…"):
-            playlist_uris  = [t['uri'] for t in tracks]
-            rec_uris       = recommend(playlist_uris)
-            rec_meta       = {t['uri']: t for t in tracks}
-
-        st.subheader("Recommendations")
-        for uri in rec_uris:
-            # Fetch metadata for recommended tracks not already in input
-            if uri not in rec_meta:
-                track_id = uri.split(':')[-1]
-                t = sp.track(track_id)
-                rec_meta[uri] = {
-                    'name':      t['name'],
-                    'artist':    t['artists'][0]['name'],
-                    'album_art': t['album']['images'][0]['url'] if t['album']['images'] else None,
-                }
-            meta = rec_meta[uri]
-            col1, col2 = st.columns([1, 5])
-            with col1:
-                if meta['album_art']:
-                    st.image(meta['album_art'], width=60)
-            with col2:
-                st.write(f"**{meta['name']}** — {meta['artist']}")
-```
-
-Run it:
+Install dependencies:
 
 ```bash
-cd stage_4
-streamlit run app.py
+uv sync
 ```
+
+Run:
+
+```bash
+PYTHONPATH=. uv run streamlit run stage_4/app.py
+```
+
+The app shows:
+
+- Stage availability: ALS ready/missing, SASRec ready/fallback, MMR ready/fallback.
+- MPD coverage: how many input tracks are known in `uri_to_id.json`.
+- Recommendation cards with rank, artist, album art, Spotify link, and score when metadata is available.
+- Analysis charts for Stage 2 ranking quality and Stage 3 relevance/diversity tradeoff.
+
+Open the **Analysis** tab to see:
+
+- Model comparison chart: Stage 1 ALS vs Stage 2 SASRec on R@10, R@100, and NDCG@10.
+- Stage 2 training curves if `train_history.json` is available locally.
+- MMR lambda sweep: λ=0.3, 0.5, 0.7 plotted against Recall@20 and ILD.
+- Percent-change chart: recall loss and diversity gain vs the Stage 2 raw top-20 baseline.
+- Parameter-variation table explaining which knobs were evaluated offline and which are demo-only.
 
 ---
 
-## Step 6 — Swap in real Stage 2 and Stage 3
+## Export Analysis Tables
 
-Once teammates finish:
+To generate concise CSV tables for the report:
 
-**Stage 2** — replace `stage2_stub`:
-```python
-import torch
-# from stage_2 import SASRec  (import their model)
-
-model = SASRec(...)
-model.load_state_dict(torch.load('../stage_2/checkpoints/sasrec_model.pt'))
-model.eval()
-
-def stage2(playlist_uris, candidate_ids):
-    # convert URIs → int IDs, run SASRec, return top-100
-    ...
+```bash
+PYTHONPATH=. uv run python -m stage_4.analysis --out-dir stage_4/analysis_exports
 ```
 
-**Stage 3** — replace `stage3_stub`:
-```python
-# from stage_3 import mmr_select, apply_rules
+This writes:
 
-def stage3(candidate_ids, candidate_scores, audio_features):
-    final = mmr_select(candidate_ids, candidate_scores, audio_features)
-    return apply_rules(final, audio_features)
 ```
+stage_4/analysis_exports/
+├── stage_comparison.csv       Stage 1 vs Stage 2 ranking metrics
+├── lambda_sweep.csv           λ sweep with Recall@20, ILD, and % changes
+└── parameter_variations.csv   What parameters were varied and why
+```
+
+These exports use local JSON metrics if present. If the JSON files are missing, they use the documented README values so the graphs remain available for the presentation.
 
 ---
 
-## File Structure
+## Fallback Behavior
 
-```
-stage_4/
-├── README.md       (this file)
-├── app.py          Streamlit app
-├── pipeline.py     stage1(), stage2(), stage3(), recommend()
-├── spotify.py      fetch_playlist_tracks() and Spotify API helpers
-└── .env            SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET (never commit this)
-```
+| Missing artifact | Behavior |
+|---|---|
+| Stage 1 ALS factors or URI map | App blocks recommendation generation and shows setup instructions |
+| Stage 2 model/embeddings | Uses Stage 1 ALS top-100 as ranking fallback |
+| Stage 3 embeddings | Uses top-N ranked items without MMR |
+| Spotify credentials | Allows pasted track URIs and displays minimal metadata |
+
+These fallbacks are for demo robustness only. The UI labels them explicitly.
 
 ---
 
-## Important
+## Tests
 
-- **Never commit `.env`** — add it to `.gitignore`
-- The app works with just Stage 1 from the start — stubs fill in for Stages 2 and 3
-- Spotify API rate limit: 30 requests/sec — fine for a demo, no throttling needed
+Run Stage 4 tests:
+
+```bash
+PYTHONPATH=. uv run pytest stage_4/tests/ -v
+```
+
+The tests cover:
+
+- Spotify playlist URL parsing.
+- Spotify track URI parsing.
+- raw ID ↔ shifted ID conversion.
+- Stage 2 artifact layout detection.
+- Stage 1 masking of already-seen input tracks.
