@@ -2,6 +2,9 @@
 
 This project builds an end-to-end playlist continuation system on the Spotify Million Playlist Dataset (MPD). Given a partial playlist as Spotify track URIs, the app recommends additional tracks that fit the same playlist context.
 
+📁 **[Link to presentation](https://drive.google.com/drive/u/1/folders/1_QebdOx9KCHu2d9rLRuYK9i0-rZ9DGuv)**
+
+
 ## How to Use the App
 
 Install dependencies:
