@@ -1,256 +1,157 @@
-# Stage 3 — Diversity Re-ranking (MMR)
+# Stage 3 — Diversity Re-ranking (MMR, embeddings-only)
 
-**Status: NOT BUILT.**
+**Status: DONE.**
 
-No training required. This is a rule-based algorithm.
+Greedy Maximal Marginal Relevance (MMR) over Stage 2's top-100 per playlist, producing a final top-20. The diversity metric is cosine similarity in Stage 2's fine-tuned 128-dim embedding space — no audio features needed. Pure NumPy, runs locally in ~25 seconds for the full λ sweep on all 150K test playlists. $0 Modal cost.
 
----
-
-## Working Without Stage 2
-
-You don't need to wait for Stage 2 to start. Use Stage 1 output directly as a substitute — the input format is identical (just 100 IDs + scores instead of 1000):
-
-```python
-import numpy as np, json
-
-item_factors = np.load('../stage_1/checkpoints/als_item_factors.npy')
-uri_to_id    = json.load(open('../stage_1/checkpoints/uri_to_id.json'))
-playlists    = np.load('../stage_1/checkpoints/playlists.npy', allow_pickle=True).tolist()
-
-def stage1_top100(playlist_ids):
-    """Substitute for Stage 2 output — use Stage 1's top-100 directly."""
-    user_emb = item_factors[playlist_ids].mean(axis=0)
-    scores   = user_emb @ item_factors.T
-    scores[playlist_ids] = -1e9
-    top100_idx = np.argpartition(scores, -100)[-100:]
-    top100_sorted = top100_idx[np.argsort(scores[top100_idx])[::-1]]
-    return top100_sorted.tolist(), scores[top100_sorted].tolist()
-
-# Test with any playlist from the test split
-n = len(playlists)
-test_playlists = playlists[int(n * 0.85):]
-context = test_playlists[0][:-1]
-
-candidate_ids, candidate_scores = stage1_top100(context)
-# Now pass these directly into your MMR function
-```
-
-For audio features, use random stubs while developing — the MMR logic works the same regardless:
-
-```python
-import random
-
-def stub_audio_features(song_ids):
-    return {
-        sid: {
-            "tempo":        random.uniform(80, 160),
-            "energy":       random.uniform(0, 1),
-            "valence":      random.uniform(0, 1),
-            "danceability": random.uniform(0, 1),
-            "artist_id":    f"artist_{sid % 500}",  # fake 500 unique artists
-        }
-        for sid in song_ids
-    }
-```
-
-Swap in real Spotify audio features once the pipeline is connected.
+Full design rationale: [`../docs/superpowers/specs/2026-05-11-stage3-mmr-design.md`](../docs/superpowers/specs/2026-05-11-stage3-mmr-design.md)
 
 ---
 
-## What This Stage Does
+## Results (150K test playlists, K=20)
 
-Takes the top-100 from Stage 2 and selects a final playlist of **20–30 songs** that is both relevant *and* diverse — no artist spam, smooth audio transitions, varied mood.
+| Config | Recall@20 | Intra-list diversity (ILD) | vs Stage 2 raw top-20 |
+|---|---|---|---|
+| Stage 2 raw top-20 (no MMR) | 0.1186 | 0.3682 | — (baseline) |
+| **MMR λ=0.5 (reported)** | **0.1135** | **0.4327** | **−4.3% recall, +17.5% diversity** |
+| MMR λ=0.7 (relevance-leaning) | 0.1173 | 0.3925 | −1.1% recall, +6.6% diversity |
+| MMR λ=0.3 (diversity-leaning) | 0.0975 | 0.4958 | −17.8% recall, +34.7% diversity |
 
----
-
-## Input
-
-```python
-candidate_ids:    List[int]    # top-100 IDs from Stage 2 (integer IDs)
-candidate_scores: List[float]  # relevance scores from Stage 2 (higher = better)
-audio_features:   Dict[int, Dict]  # per-song audio features (see below)
-```
-
-### Audio features format
-
-```python
-{
-    song_id: {
-        "tempo":        float,   # BPM (e.g. 120.0)
-        "energy":       float,   # 0–1
-        "valence":      float,   # 0–1 (mood: sad → happy)
-        "danceability": float,   # 0–1
-        "artist_id":    str,     # Spotify artist URI
-    }
-}
-```
-
-These can be fetched from the Spotify Web API (requires credentials) or pre-computed offline.
-If the Spotify API is unavailable, use random uniform features as a stub — the algorithm logic still demonstrates correctly.
+The λ knob behaves as designed: clean monotonic tradeoff between recall and diversity. `ILD` is the mean pairwise cosine *distance* (1 − cosine_similarity) among the final 20 songs, averaged over all 150K playlists. Higher ILD = more variety in the final playlist.
 
 ---
 
-## Output
+## What this stage does
 
-```python
-final_ids:    List[int]    # 20–30 song IDs, ordered for listening
-final_scores: List[float]  # final MMR scores
+Input: Stage 2's top-100 candidate songs per playlist + their relevance scores + Stage 2's fine-tuned item embeddings.
+
+Output: a final top-20 per playlist that balances relevance with intra-list diversity.
+
+Algorithm: greedy MMR, applied iteratively K=20 times per playlist:
+
 ```
+score(candidate) = λ · relevance(candidate)
+                 − (1 − λ) · max_similarity_to_already_selected(candidate)
+```
+
+- **First pick**: the candidate with highest relevance (no diversity term applies).
+- **Subsequent picks**: maximize the score above. High relevance AND not too similar to any song already selected.
+- **Similarity**: cosine in Stage 2's 128-dim embedding space.
+- **λ ∈ [0, 1]**: the knob. λ=1 → pure Stage 2 ordering; λ=0 → pure diversity.
 
 ---
 
-## Algorithm — Maximal Marginal Relevance
+## Why no audio features
 
-At each step pick the next song that maximises:
+The original Stage 3 design (in `final_project.md`) used audio features (tempo, energy, valence, danceability) + artist/genre metadata to define similarity and to apply rule-based filters (artist cap, tempo continuity, energy continuity, valence smoothing). **None of that data was available in this project's scope** — accessing Spotify's Web API for 2.26M tracks was infeasible.
 
-```
-MMR(s) = λ · relevance(s)  −  (1 − λ) · max_sim(s, already_selected)
-```
-
-where `max_sim` is the maximum cosine similarity in the audio feature space between candidate `s` and any already-selected song.
-
-```python
-import numpy as np
-
-def mmr_select(candidate_ids, scores, audio_features,
-               n=25, lam=0.7):
-    """
-    candidate_ids: List[int] of length 100
-    scores:        np.ndarray of length 100 (higher = better, already normalized)
-    audio_features: Dict[int, Dict]
-    returns: List[int] of length n
-    """
-    # Build feature matrix (100, 4)
-    keys = ['tempo', 'energy', 'valence', 'danceability']
-    feat = np.array([[audio_features[i].get(k, 0.5) for k in keys]
-                     for i in candidate_ids], dtype=np.float32)
-    feat /= feat.max(axis=0) + 1e-8   # normalize each feature to [0,1]
-
-    rel = np.array(scores, dtype=np.float32)
-    rel = (rel - rel.min()) / (rel.max() - rel.min() + 1e-8)  # normalize to [0,1]
-
-    selected = []
-    remaining = list(range(len(candidate_ids)))
-
-    for _ in range(n):
-        if not remaining:
-            break
-
-        if not selected:
-            # First pick: highest relevance
-            pick = max(remaining, key=lambda i: rel[i])
-        else:
-            sel_feat = feat[selected]   # (k, 4)
-            best_score = -np.inf
-            pick = remaining[0]
-            for i in remaining:
-                sim = np.max(
-                    np.dot(sel_feat, feat[i]) /
-                    (np.linalg.norm(sel_feat, axis=1) * np.linalg.norm(feat[i]) + 1e-8)
-                )
-                s = lam * rel[i] - (1 - lam) * sim
-                if s > best_score:
-                    best_score, pick = s, i
-
-        selected.append(pick)
-        remaining.remove(pick)
-
-    return [candidate_ids[i] for i in selected]
-```
+The clean reduction: replace audio-feature similarity with **embedding similarity in Stage 2's learned representation space**. Item embeddings encode co-occurrence and sequential structure, so songs that are close in embedding space tend to substitute for each other in playlists. That's exactly the property MMR wants from its similarity metric. The audio-rule-based filters were dropped entirely.
 
 ---
 
-## Hard Rules (applied after MMR)
+## File structure
 
-These rules override MMR if violated. Apply as a post-filter:
-
-| Rule | Implementation |
-|---|---|
-| Artist cap | Remove duplicates so no artist appears more than **2×** in final 20–30 |
-| Tempo continuity | Reorder: consecutive songs differ by < 20 BPM |
-| Energy continuity | Reorder: consecutive songs differ by < 0.3 in energy |
-
-```python
-def apply_rules(song_ids, audio_features, max_per_artist=2):
-    artist_count = {}
-    filtered = []
-    for sid in song_ids:
-        artist = audio_features[sid].get('artist_id', sid)
-        if artist_count.get(artist, 0) < max_per_artist:
-            artist_count[artist] = artist_count.get(artist, 0) + 1
-            filtered.append(sid)
-    return filtered
 ```
+stage_3/
+├── mmr.py                  Vectorized greedy MMR + helpers (130 lines)
+├── evaluate.py             Recall@K + intra-list diversity + Stage 2 baseline (70 lines)
+├── run_stage3.py           Main driver: load → λ sweep → save → eval → write JSON (150 lines)
+├── tests/test_mmr.py       10 unit tests (all green)
+└── checkpoints/            Outputs (gitignored)
+```
+
+No training, no Modal, no GPU. Pure NumPy.
+
+---
+
+## How to run
+
+**Prerequisites (one-time):** Stage 2 outputs must be locally available at `stage_2/checkpoints/`:
+
+```bash
+# Required
+modal volume get stage2-data runs/main/test_top100.npy            ./stage_2/checkpoints/
+modal volume get stage2-data runs/main/test_top100_scores.npy     ./stage_2/checkpoints/
+# Required for the diversity metric (1.1 GB)
+modal volume get stage2-data runs/main/best/item_embeddings.npy   ./stage_2/checkpoints/best_item_embeddings.npy
+# Required to derive the held-out test targets (200 MB)
+modal volume get stage2-data derived/playlists_padded.npy         ./stage_2/checkpoints/
+```
+
+**Run unit tests:**
+
+```bash
+uv run pytest stage_3/tests/ -v
+```
+
+10 tests, ~0.2 s.
+
+**Run the full pipeline (λ sweep + save final top-20 for λ=0.5):**
+
+```bash
+PYTHONPATH=. uv run python stage_3/run_stage3.py
+```
+
+Wall-clock: ~25 sec for the full sweep on all 150K test playlists (3 λ values + baseline + eval). RAM peak: ~3 GB (loads the 1.1 GB embedding table once).
+
+---
+
+## Artifacts produced (in `stage_3/checkpoints/`, gitignored)
+
+```
+test_final20.npy             (150_000, 20) int32   — final per-playlist IDs (λ=0.5)
+test_final20_scores.npy      (150_000, 20) float32 — MMR composite score at pick time
+test_metrics.json            Baseline + reported-λ metrics
+lambda_sweep.json            Full per-λ tradeoff (used for the report figure)
+```
+
+IDs are in the **+1-shifted space** (same as Stage 2's output). To convert back to Spotify URIs, subtract 1 and look up in `stage_1/checkpoints/uri_to_id.json`.
+
+---
+
+## Hyperparameters (constants at top of `run_stage3.py`)
+
+| Parameter | Value | Why |
+|---|---|---|
+| `K` | 20 | Standard playlist length; matches the original spec's lower bound |
+| `LAMBDA_GRID` | `[0.3, 0.5, 0.7]` | Three-point sweep gives a tradeoff curve for the report |
+| `REPORTED_LAMBDA` | 0.5 | Balanced point; recall loss ~4%, diversity gain ~18% |
+| `BATCH_SIZE` | 1024 | Vectorizes over playlists; 1024 fits in RAM comfortably |
+
+---
+
+## Vectorization
+
+Naive per-playlist Python loop = ~1 sec/playlist × 150K = ~40 hours, infeasible. The actual implementation processes B=1024 playlists at a time:
+
+1. Gather all candidate embeddings into a `(B, 100, 128)` tensor.
+2. Maintain a `running_max_sim` of shape `(B, 100)` — the maximum cosine similarity of each candidate to *any* already-selected candidate, per playlist.
+3. At each of K=20 steps:
+   - Compute the MMR score: `λ · rel − (1-λ) · running_max_sim`.
+   - Mask already-picked candidates to `-inf` (no duplicate selection).
+   - `argmax` along the candidate axis → one pick per playlist.
+   - Update `running_max_sim` with the new picks' similarities (one `einsum` per step).
+4. Total work: O(B × K × C × D) per batch — fully vectorized, runs in NumPy without any GPU.
+
+End-to-end: ~7 sec per λ value on a laptop.
 
 ---
 
 ## Evaluation
 
-There is no single ground-truth for diversity — evaluate with:
+Two metrics computed on all 150K test playlists:
 
-| Metric | What it measures |
-|---|---|
-| Artist coverage | # unique artists in final 20–30 |
-| Avg pairwise audio distance | diversity across tempo/energy/valence/danceability |
-| Avg consecutive tempo delta | transition smoothness |
-| Avg consecutive energy delta | transition smoothness |
+1. **Recall@20** — fraction of playlists where the held-out true next song appears in the final 20. Compared against the Stage 2 raw top-20 baseline (just take Stage 2's top-20 without re-ranking) to measure how much recall we sacrificed for diversity.
 
-```python
-def diversity_score(song_ids, audio_features):
-    keys = ['tempo', 'energy', 'valence', 'danceability']
-    feats = np.array([[audio_features[s].get(k, 0.5) for k in keys]
-                      for s in song_ids])
-    n = len(feats)
-    total = 0.0
-    for i in range(n):
-        for j in range(i + 1, n):
-            total += np.linalg.norm(feats[i] - feats[j])
-    return total / (n * (n - 1) / 2)
-```
+2. **Intra-list diversity (ILD)** — mean pairwise cosine *distance* among the final 20 songs (averaged across all playlists). Bounded in [0, 2]; 0 = all identical, 1 = orthogonal. Higher = more diverse.
+
+The λ sweep gives the tradeoff curve. Pick λ based on whether you care more about recall (high λ) or playlist variety (low λ).
 
 ---
 
-## Suggested File Structure
+## Out of scope
 
-```
-stage_3/
-├── README.md          (this file)
-├── mmr.py             MMR selection algorithm
-├── rules.py           hard rule post-filters
-├── evaluate_stage3.py diversity metrics
-└── demo.py            end-to-end demo with stub audio features
-```
-
----
-
-## Integration with Stages 1 and 2
-
-```python
-# Full pipeline
-import numpy as np, json
-
-item_factors = np.load('../stage_1/checkpoints/als_item_factors.npy')
-uri_to_id    = json.load(open('../stage_1/checkpoints/uri_to_id.json'))
-id_to_uri    = {v: k for k, v in uri_to_id.items()}
-
-# Stage 1
-candidate_ids = stage1_get_candidates(playlist_ids, k=1000)
-
-# Stage 2
-ranked_ids, ranked_scores = stage2_rerank(playlist_ids, candidate_ids, k=100)
-
-# Stage 3
-final_ids = mmr_select(ranked_ids, ranked_scores, audio_features, n=25)
-final_ids = apply_rules(final_ids, audio_features)
-
-# Convert back to URIs
-final_uris = [id_to_uri[i] for i in final_ids]
-```
-
----
-
-## Tuning λ
-
-- λ = 1.0 → pure relevance (no diversity)
-- λ = 0.0 → pure diversity (ignores relevance)
-- λ = 0.7 is a reasonable default; tune on the validation set
+- Audio-feature-based rules (artist cap, tempo continuity, valence smoothing) — data not available.
+- Fine-grained λ tuning beyond the three-point sweep.
+- Other diversity algorithms (DPP, clustering-based) — MMR is sufficient.
+- Per-playlist λ adaptation (e.g. tighter λ for short context, broader for long).
