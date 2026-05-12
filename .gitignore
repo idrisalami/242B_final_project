@@ -24,3 +24,6 @@ stage_2/data/
 
 # Stage 3
 stage_3/checkpoints/
+
+# Teammate handoff bundle (binary artifacts for Drive upload)
+handoff/
